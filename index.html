@@ -744,7 +744,7 @@
           localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
           localVideo.srcObject = localStream
 
-          pc = new RTCPeerConnection()
+          pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }] })
           pc.ontrack = addRemoteTrack
           pc.onicecandidate = event => {
             if (!event.candidate || ws?.readyState !== WebSocket.OPEN) {
