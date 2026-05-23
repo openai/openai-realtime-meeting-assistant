@@ -5,6 +5,7 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 	"text/template"
 	"time"
@@ -86,6 +87,7 @@ func main() {
 
 	// websocket handler
 	http.HandleFunc("/websocket", websocketHandler)
+	http.HandleFunc("/transcript", transcriptDownloadHandler)
 
 	// index.html handler
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +107,27 @@ func main() {
 	if err = http.ListenAndServe(*addr, nil); err != nil { //nolint: gosec
 		log.Errorf("Failed to start http server: %v", err)
 	}
+}
+
+func transcriptDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	transcriptPath := kanbanApp.currentTranscriptPath()
+	if transcriptPath == "" {
+		http.Error(w, "no transcript is available for the current meeting", http.StatusNotFound)
+		return
+	}
+	if _, err := os.Stat(transcriptPath); err != nil {
+		http.Error(w, "transcript file is unavailable", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(transcriptPath)+`"`)
+	http.ServeFile(w, r, transcriptPath)
 }
 
 func newPeerConnection() (*webrtc.PeerConnection, error) {
@@ -341,8 +364,22 @@ func websocketHandler(w http.ResponseWriter, r *http.Request) { // nolint
 	})
 	listLock.Unlock()
 
+	transcriptPath, err := kanbanApp.ResetMeeting()
+	if err != nil {
+		log.Errorf("Failed to reset meeting: %v", err)
+		if sendErr := sendKanbanEvent(c, "status", "Transcript setup failed: "+err.Error()); sendErr != nil {
+			log.Errorf("Failed to send Kanban status: %v", sendErr)
+		}
+	} else {
+		log.Infof("Started fresh meeting transcript: %s", transcriptPath)
+	}
+	broadcastKanbanEvent("board", kanbanApp.snapshotState())
+
 	if err := sendKanbanEvent(c, "board", kanbanApp.snapshotState()); err != nil {
 		log.Errorf("Failed to send Kanban board state: %v", err)
+	}
+	if err := sendKanbanEvent(c, "transcript", kanbanApp.snapshotTranscript()); err != nil {
+		log.Errorf("Failed to send transcript state: %v", err)
 	}
 	if err := sendKanbanEvent(c, "status", "Connected to conference room"); err != nil {
 		log.Errorf("Failed to send Kanban status: %v", err)

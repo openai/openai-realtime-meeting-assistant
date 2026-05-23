@@ -125,6 +125,12 @@
         z-index: 1;
       }
 
+      .video-rail {
+        display: grid;
+        align-content: start;
+        gap: 12px;
+      }
+
       video {
         display: block;
         width: 100%;
@@ -139,6 +145,61 @@
         grid-template-columns: 1fr;
         align-content: start;
         gap: 12px;
+      }
+
+      .transcript-panel {
+        display: grid;
+        gap: 10px;
+        border-radius: 8px;
+        background: #303134;
+        padding: 12px;
+      }
+
+      .transcript-panel header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .transcript-panel h2 {
+        font-size: 13px;
+        line-height: 1.2;
+      }
+
+      .transcript-list {
+        display: grid;
+        align-content: start;
+        gap: 8px;
+        min-height: 150px;
+        max-height: min(32vh, 280px);
+        overflow: auto;
+        border-radius: 8px;
+        background: #202124;
+        padding: 10px;
+      }
+
+      .transcript-entry {
+        display: grid;
+        gap: 3px;
+      }
+
+      .transcript-entry strong {
+        color: #e8eaed;
+        font-size: 12px;
+        line-height: 1.2;
+      }
+
+      .transcript-entry p {
+        color: #bdc1c6;
+        font-size: 13px;
+        line-height: 1.45;
+        overflow-wrap: anywhere;
+      }
+
+      .download-transcript {
+        width: 100%;
+        border-radius: 8px;
       }
 
       .video-tile {
@@ -682,6 +743,15 @@
               <span class="video-label">You</span>
             </div>
           </div>
+          <section class="transcript-panel" aria-label="Meeting transcript">
+            <header>
+              <h2>Transcript</h2>
+            </header>
+            <div id="transcriptList" class="transcript-list" aria-live="polite">
+              <p class="empty">Empty</p>
+            </div>
+            <button id="downloadTranscript" class="download-transcript" type="button">Download transcript</button>
+          </section>
         </aside>
       </div>
 
@@ -707,6 +777,8 @@
       const leaveButton = document.getElementById('leave')
       const localVideo = document.getElementById('localVideo')
       const videoStack = document.getElementById('videoStack')
+      const transcriptList = document.getElementById('transcriptList')
+      const downloadTranscriptButton = document.getElementById('downloadTranscript')
       const toastRegion = document.getElementById('toastRegion')
       const commentPreviewRegion = document.getElementById('commentPreviewRegion')
       const cardDetailRegion = document.getElementById('cardDetailRegion')
@@ -715,6 +787,8 @@
       let pc
       let ws
       let localStream
+      let transcriptEntries = []
+      let transcriptDownloadURL = '/transcript'
       let hasBoardSnapshot = false
       let commentPreviewTimer
       const remoteElements = new Map()
@@ -722,6 +796,9 @@
 
       joinButton.addEventListener('click', joinRoom)
       leaveButton.addEventListener('click', leaveRoom)
+      downloadTranscriptButton.addEventListener('click', () => {
+        window.location.href = transcriptDownloadURL || '/transcript'
+      })
       window.addEventListener('beforeunload', leaveRoom)
       window.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
@@ -810,6 +887,11 @@
             break
           case 'status':
             setLog(String(message.data || ''))
+            break
+          case 'transcript':
+            transcriptEntries = Array.isArray(message.data?.entries) ? message.data.entries : []
+            transcriptDownloadURL = String(message.data?.downloadUrl || '/transcript')
+            renderTranscript()
             break
         }
       }
@@ -930,6 +1012,32 @@
         return article
       }
 
+      function renderTranscript() {
+        transcriptList.replaceChildren()
+        if (transcriptEntries.length === 0) {
+          const empty = document.createElement('p')
+          empty.className = 'empty'
+          empty.textContent = 'Empty'
+          transcriptList.appendChild(empty)
+          return
+        }
+
+        transcriptList.append(...transcriptEntries.map(entry => {
+          const item = document.createElement('article')
+          item.className = 'transcript-entry'
+
+          const speaker = document.createElement('strong')
+          speaker.textContent = entry.speaker || 'Meeting audio'
+
+          const text = document.createElement('p')
+          text.textContent = entry.text || ''
+
+          item.append(speaker, text)
+          return item
+        }))
+        transcriptList.scrollTop = transcriptList.scrollHeight
+      }
+
       function renderOwnerAvatar(card, options = {}) {
         const owner = cardOwner(card)
         const avatar = document.createElement('span')
@@ -941,6 +1049,11 @@
       }
 
       function cardOwner(card) {
+        const owner = String(card?.owner || '').trim()
+        if (owner) {
+          return { name: owner }
+        }
+
         const owners = [
           'Avery Chen',
           'Blake Stone',
