@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ const (
 	realtimeInputTrackID      = "kanban-realtime:mixed-audio"
 	realtimeInputStreamID     = "kanban-realtime-input"
 	realtimeMixedAudioSinkKey = "kanban-realtime"
+	defaultCardOwner          = "Marcus Wade"
+	defaultTranscriptDir      = "transcripts"
 )
 
 type kanbanStatus string
@@ -48,6 +51,7 @@ type kanbanCard struct {
 	Title  string       `json:"title"`
 	Notes  string       `json:"notes"`
 	Tags   []string     `json:"tags"`
+	Owner  string       `json:"owner"`
 }
 
 type kanbanBoardState struct {
@@ -55,9 +59,21 @@ type kanbanBoardState struct {
 	UpdatedAt string       `json:"updatedAt,omitempty"`
 }
 
+type meetingTranscriptState struct {
+	Entries     []meetingTranscriptEntry `json:"entries"`
+	DownloadURL string                   `json:"downloadUrl"`
+}
+
+type meetingTranscriptEntry struct {
+	At      string `json:"at"`
+	Speaker string `json:"speaker"`
+	Text    string `json:"text"`
+}
+
 type kanbanRealtimeEvent struct {
 	Type       string `json:"type,omitempty"`
 	Transcript string `json:"transcript,omitempty"`
+	ItemID     string `json:"item_id,omitempty"`
 	Name       string `json:"name,omitempty"`
 	Arguments  string `json:"arguments,omitempty"`
 	CallID     string `json:"call_id,omitempty"`
@@ -79,11 +95,14 @@ type kanbanRealtimeOutputItem struct {
 }
 
 type kanbanBoardApp struct {
-	mu               sync.Mutex
-	cards            []kanbanCard
-	nextCreatedIndex int
-	updatedAt        time.Time
-	handledCalls     map[string]struct{}
+	mu                sync.Mutex
+	cards             []kanbanCard
+	nextCreatedIndex  int
+	updatedAt         time.Time
+	handledCalls      map[string]struct{}
+	transcriptDir     string
+	transcriptPath    string
+	transcriptEntries []meetingTranscriptEntry
 
 	model      string
 	pc         *webrtc.PeerConnection
@@ -101,6 +120,7 @@ var initialKanbanBoardCards = []kanbanCard{
 		Title:  "Add RTP Retransmission Buffer",
 		Notes:  "Keep recent RTP packets available for NACK-driven retransmission without unbounded memory growth.",
 		Tags:   []string{"webrtc", "rtp", "nack"},
+		Owner:  defaultCardOwner,
 	},
 	{
 		ID:     "card-003",
@@ -108,6 +128,7 @@ var initialKanbanBoardCards = []kanbanCard{
 		Title:  "Implement ICE Restart Handling",
 		Notes:  "Support renegotiation paths that refresh ICE credentials and reconnect peers after network changes.",
 		Tags:   []string{"webrtc", "ice", "signaling"},
+		Owner:  defaultCardOwner,
 	},
 	{
 		ID:     "card-004",
@@ -115,6 +136,7 @@ var initialKanbanBoardCards = []kanbanCard{
 		Title:  "Harden DTLS/SRTP Cleanup",
 		Notes:  "Ensure failed and closed peer connections release transports, tracks, and SRTP state promptly.",
 		Tags:   []string{"webrtc", "dtls", "srtp"},
+		Owner:  defaultCardOwner,
 	},
 	{
 		ID:     "card-005",
@@ -122,6 +144,7 @@ var initialKanbanBoardCards = []kanbanCard{
 		Title:  "Add Simulcast Forwarding Controls",
 		Notes:  "Choose forwarded RTP layers per subscriber so the server can adapt streams to bandwidth and viewport size.",
 		Tags:   []string{"webrtc", "simulcast", "bandwidth"},
+		Owner:  defaultCardOwner,
 	},
 	{
 		ID:     "card-001",
@@ -129,16 +152,57 @@ var initialKanbanBoardCards = []kanbanCard{
 		Title:  "Finish RTP HEVC Packetizer",
 		Notes:  "Complete HEVC payload fragmentation, aggregation, and marker-bit handling for outbound RTP streams.",
 		Tags:   []string{"webrtc", "rtp", "hevc"},
+		Owner:  defaultCardOwner,
 	},
 }
 
 func newKanbanBoardApp() *kanbanBoardApp {
 	return &kanbanBoardApp{
-		cards:            cloneKanbanCards(initialKanbanBoardCards),
+		cards:            []kanbanCard{},
 		nextCreatedIndex: 1,
 		updatedAt:        time.Now().UTC(),
 		handledCalls:     map[string]struct{}{},
+		transcriptDir:    defaultTranscriptDir,
 	}
+}
+
+func (app *kanbanBoardApp) ResetMeeting() (string, error) {
+	transcriptPath, err := app.createTranscriptFile()
+
+	app.mu.Lock()
+	app.cards = []kanbanCard{}
+	app.nextCreatedIndex = 1
+	app.updatedAt = time.Now().UTC()
+	app.handledCalls = map[string]struct{}{}
+	app.transcriptEntries = nil
+	if err == nil {
+		app.transcriptPath = transcriptPath
+	}
+	app.mu.Unlock()
+
+	return transcriptPath, err
+}
+
+func (app *kanbanBoardApp) createTranscriptFile() (string, error) {
+	app.mu.Lock()
+	transcriptDir := app.transcriptDir
+	app.mu.Unlock()
+	if transcriptDir == "" {
+		transcriptDir = defaultTranscriptDir
+	}
+
+	startedAt := time.Now().UTC()
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		return "", fmt.Errorf("create transcript directory: %w", err)
+	}
+
+	transcriptPath := filepath.Join(transcriptDir, "meeting-"+startedAt.Format("20060102-150405")+".md")
+	header := fmt.Sprintf("# Meeting Transcript\n\nStarted: %s\n\n", startedAt.Format(time.RFC3339))
+	if err := os.WriteFile(transcriptPath, []byte(header), 0o644); err != nil {
+		return "", fmt.Errorf("create transcript file: %w", err)
+	}
+
+	return transcriptPath, nil
 }
 
 func (app *kanbanBoardApp) JoinConferenceRoom() error {
@@ -608,17 +672,10 @@ func (app *kanbanBoardApp) handleRealtimeEvent(raw []byte) {
 			log.Errorf("OpenAI Realtime error code=%s message=%s", event.Error.Code, event.Error.Message)
 			broadcastKanbanEvent("status", event.Error.Message)
 		}
-	case "response.output_item.done":
-		if event.Item != nil && event.Item.Type == "function_call" {
-			app.handleToolCall(*event.Item)
+	case "conversation.item.input_audio_transcription.completed":
+		if err := app.appendTranscript(event.Transcript); err != nil {
+			log.Errorf("Failed to append meeting transcript: %v", err)
 		}
-	case "response.function_call_arguments.done":
-		app.handleToolCall(kanbanRealtimeOutputItem{
-			Type:      "function_call",
-			Name:      event.Name,
-			Arguments: event.Arguments,
-			CallID:    event.CallID,
-		})
 	case "response.done":
 		if event.Response == nil {
 			return
@@ -629,6 +686,53 @@ func (app *kanbanBoardApp) handleRealtimeEvent(raw []byte) {
 			}
 		}
 	}
+}
+
+func (app *kanbanBoardApp) appendTranscript(transcript string) error {
+	transcript = strings.TrimSpace(transcript)
+	if transcript == "" {
+		return nil
+	}
+
+	app.mu.Lock()
+	transcriptPath := app.transcriptPath
+	app.mu.Unlock()
+	if transcriptPath == "" {
+		var err error
+		transcriptPath, err = app.createTranscriptFile()
+		if err != nil {
+			return err
+		}
+		app.mu.Lock()
+		if app.transcriptPath == "" {
+			app.transcriptPath = transcriptPath
+		}
+		app.mu.Unlock()
+	}
+
+	entry := meetingTranscriptEntry{
+		At:      time.Now().UTC().Format(time.RFC3339),
+		Speaker: "Meeting audio",
+		Text:    transcript,
+	}
+	markdownEntry := fmt.Sprintf("- %s - **%s:** %s\n", entry.At, entry.Speaker, entry.Text)
+	file, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open transcript file: %w", err)
+	}
+	defer file.Close()
+
+	if _, err := file.WriteString(markdownEntry); err != nil {
+		return fmt.Errorf("write transcript entry: %w", err)
+	}
+
+	app.mu.Lock()
+	app.transcriptEntries = append(app.transcriptEntries, entry)
+	app.mu.Unlock()
+
+	broadcastKanbanEvent("transcript", app.snapshotTranscript())
+
+	return nil
 }
 
 func (app *kanbanBoardApp) handleToolCall(outputItem kanbanRealtimeOutputItem) {
@@ -733,6 +837,7 @@ func (app *kanbanBoardApp) createTicket(args map[string]any) (map[string]any, bo
 		Title:  title,
 		Notes:  notes,
 		Tags:   tags,
+		Owner:  defaultCardOwner,
 	}
 	app.cards = append(app.cards, card)
 	app.touchLocked()
@@ -873,6 +978,24 @@ func (app *kanbanBoardApp) snapshotState() kanbanBoardState {
 	return state
 }
 
+func (app *kanbanBoardApp) snapshotTranscript() meetingTranscriptState {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	entries := append([]meetingTranscriptEntry(nil), app.transcriptEntries...)
+	return meetingTranscriptState{
+		Entries:     entries,
+		DownloadURL: "/transcript",
+	}
+}
+
+func (app *kanbanBoardApp) currentTranscriptPath() string {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+
+	return app.transcriptPath
+}
+
 func (app *kanbanBoardApp) createCardIDLocked() string {
 	for {
 		cardID := fmt.Sprintf("kanban-card-%03d", app.nextCreatedIndex)
@@ -914,6 +1037,7 @@ func cloneKanbanCard(card kanbanCard) kanbanCard {
 		Title:  card.Title,
 		Notes:  card.Notes,
 		Tags:   append([]string(nil), card.Tags...),
+		Owner:  card.Owner,
 	}
 }
 
