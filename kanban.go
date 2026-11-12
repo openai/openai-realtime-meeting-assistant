@@ -806,7 +806,7 @@ func (app *kanbanBoardApp) updateTicket(args map[string]any) (map[string]any, bo
 	}
 
 	title := asString(args["title"])
-	notes := asString(args["notes"])
+	notes, hasNotes := args["notes"].(string)
 
 	app.mu.Lock()
 	defer app.mu.Unlock()
@@ -818,8 +818,8 @@ func (app *kanbanBoardApp) updateTicket(args map[string]any) (map[string]any, bo
 	if title != "" {
 		card.Title = title
 	}
-	if notes != "" {
-		card.Notes = notes
+	if hasNotes && (notes == "" || strings.TrimSpace(notes) != "") {
+		card.Notes = strings.TrimSpace(notes)
 	}
 	app.touchLocked()
 
