@@ -9,6 +9,9 @@ func TestUpdateTicketNotes(t *testing.T) {
 		want string
 	}{
 		{"clear", `{"card_id":"card-1","notes":""}`, ""},
+		{"whitespace", `{"card_id":"card-1","notes":" \t\n "}`, "Old context"},
+		{"padded", `{"card_id":"card-1","notes":" New context "}`, "New context"},
+		{"non-string", `{"card_id":"card-1","notes":42}`, "Old context"},
 		{"replace", `{"card_id":"card-1","notes":"New context"}`, "New context"},
 		{"omitted", `{"card_id":"card-1","title":"New title"}`, "Old context"},
 		{"null", `{"card_id":"card-1","notes":null}`, "Old context"},

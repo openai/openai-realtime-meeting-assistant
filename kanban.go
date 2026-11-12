@@ -818,7 +818,7 @@ func (app *kanbanBoardApp) updateTicket(args map[string]any) (map[string]any, bo
 	if title != "" {
 		card.Title = title
 	}
-	if hasNotes {
+	if hasNotes && (notes == "" || strings.TrimSpace(notes) != "") {
 		card.Notes = strings.TrimSpace(notes)
 	}
 	app.touchLocked()
